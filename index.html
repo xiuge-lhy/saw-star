@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js 手势实时 AR 粒子系统</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #030a18; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        /* 【核心修改 1】摄像头视频作为全屏背景 */
+        .input_video {
+            position: fixed; /* 保持不动，作为背景 */
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* 确保视频铺满整个屏幕 */
+            z-index: -1; /* 将视频放在最底层，低于 Three.js Canvas 和 UI */
+            transform: scaleX(-1); /* 保持水平镜像，符合自拍习惯 */
+            opacity: 1; /* 视频背景需要完全不透明 */
+        }
+        
+        /* Three.js Canvas 默认会添加到 body 中，它将位于视频之上 */
+        canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 0; /* 粒子层 */
+        }
+
+        /* UI 控制面板 */
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px;
+            background: rgba(15, 25, 40, 0.85);
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 250px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(0, 204, 255, 0.5);
+            z-index: 10;
+        }
+
+        #ui-panel h3 { color: #00ccff; border-bottom: 1px solid rgba(0, 204, 255, 0.3); padding-bottom: 5px; margin-top: 0; }
+        
+        #ui-panel label, #ui-panel button, #ui-panel select {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #ccc;
+        }
+        
+        #ui-panel input[type="color"] {
+            width: 80px; height: 30px; padding: 2px; border: 1px solid #00ccff; background: #222;
+        }
+        
+        #ui-panel select {
+            width: 100%; padding: 5px; background: #222; color: #fff; border: 1px solid #00ccff; border-radius: 3px;
+        }
+
+        /* 状态和全屏按钮 */
+        #status-bar {
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+            padding: 5px 15px; background: rgba(15, 25, 40, 0.6); color: #00ccff; border-radius: 4px; font-size: 14px;
+            z-index: 10;
+        }
+        
+        #fullscreen-btn {
+            position: absolute; top: 10px; right: 10px;
+            background: rgba(0, 204, 255, 0.1); border: 1px solid #00ccff; color: #00ccff; padding: 8px 15px; cursor: pointer; border-radius: 4px; transition: background 0.2s;
+            z-index: 10;
+        }
+        #fullscreen-btn:hover {
+            background: rgba(0, 204, 255, 0.3);
+        }
+    </style>
+</head>
+<body>
+
+    <video class="input_video" autoplay playsinline muted></video>
+
+    <div id="ui-panel">
+        <h3>🌌 AR 粒子控制中心</h3>
+        
+        <label for="color-picker">粒子颜色定制:</label>
+        <input type="color" id="color-picker" value="#00ccff">
+
+        <label for="particle-model">模型生成 (形状):</label>
+        <select id="particle-model">
+            <option value="sphere">Sphere (球体)</option>
+            <option value="box">Box (立方体)</option>
+            <option value="torus">Torus (甜甜圈)</option>
+            <option value="random">Random (随机云)</option>
+        </select>
+        
+        <label>手势状态:</label>
+        <span id="hand-state" style="color:#00ccff;">未激活摄像头</span>
+    </div>
+    
+    <div id="status-bar">系统初始化中...</div>
+
+    <button id="fullscreen-btn">全屏模式</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        const PARTICLE_COUNT = 30000;
+        let particles, geometry, material;
+        let scene, camera, renderer;
+        let targetScale = 1.0; 
+        let currentShape = 'sphere';
+
+        // UI元素
+        const colorPicker = document.getElementById('color-picker');
+        const modelSelect = document.getElementById('particle-model');
+        const handStateSpan = document.getElementById('hand-state');
+        const fullscreenBtn = document.getElementById('fullscreen-btn');
+        const statusBar = document.getElementById('status-bar');
+        const videoElement = document.getElementsByClassName('input_video')[0];
+
+        // --- 1. Three.js 场景设置 ---
+        function initScene() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            // 【核心修改 2】设置 alpha: true 让背景透明
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); 
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            
+            // 必须设置 clearColor 为 0，且 alpha 为 0，确保 Three.js 不绘制背景
+            renderer.setClearColor(0x000000, 0); 
+            
+            document.body.appendChild(renderer.domElement);
+            
+            scene.add(new THREE.AmbientLight(0x404040, 2));
+        }
+
+        // --- 2. 粒子模型生成 (代码逻辑与之前相同，此处省略以保持简洁) ---
+        function generatePositions(shape) {
+            let geometryTemplate;
+            switch(shape) {
+                case 'sphere':
+                    geometryTemplate = new THREE.SphereGeometry(2, 64, 64);
+                    break;
+                case 'box':
+                    geometryTemplate = new THREE.BoxGeometry(4, 4, 4);
+                    break;
+                case 'torus':
+                    geometryTemplate = new THREE.TorusGeometry(2, 0.8, 16, 100);
+                    break;
+                case 'random':
+                default:
+                    const positions = new Float32Array(PARTICLE_COUNT * 3);
+                    for (let i = 0; i < PARTICLE_COUNT * 3; i += 3) {
+                        positions[i] = (Math.random() - 0.5) * 6;
+                        positions[i + 1] = (Math.random() - 0.5) * 6;
+                        positions[i + 2] = (Math.random() - 0.5) * 6;
+                    }
+                    return new THREE.BufferAttribute(positions, 3);
+            }
+            
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            const templatePositions = geometryTemplate.attributes.position.array;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const templateIndex = Math.floor(Math.random() * (templatePositions.length / 3)) * 3;
+                positions[i * 3] = templatePositions[templateIndex];
+                positions[i * 3 + 1] = templatePositions[templateIndex + 1];
+                positions[i * 3 + 2] = templatePositions[templateIndex + 2];
+            }
+            
+            geometryTemplate.dispose();
+            return new THREE.BufferAttribute(positions, 3);
+        }
+
+        function initParticles(shape, color) {
+            if (particles) {
+                scene.remove(particles);
+                particles.geometry.dispose();
+                particles.material.dispose();
+            }
+            
+            currentShape = shape;
+            geometry = new THREE.BufferGeometry();
+            
+            const positionAttribute = generatePositions(shape);
+            geometry.setAttribute('position', positionAttribute);
+
+            material = new THREE.PointsMaterial({
+                color: new THREE.Color(color),
+                size: 0.02,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+            
+            particles.scale.set(1.0, 1.0, 1.0); 
+            targetScale = 1.0;
+        }
+
+        // --- 3. UI 和事件监听 ---
+        colorPicker.addEventListener('input', () => {
+            material.color.set(colorPicker.value);
+            statusBar.innerText = `视觉定制: 颜色已更新为 ${colorPicker.value}`;
+        });
+        
+        modelSelect.addEventListener('change', () => {
+            initParticles(modelSelect.value, colorPicker.value);
+            statusBar.innerText = `模型生成: 已切换为 ${modelSelect.value} 形状粒子`;
+        });
+        
+        // 全屏按钮逻辑
+        fullscreenBtn.addEventListener('click', () => {
+            const container = document.body;
+            if (!document.fullscreenElement) {
+                container.requestFullscreen().catch(err => {
+                    statusBar.innerText = "全屏失败: " + err.message;
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 4. MediaPipe 手势识别 (逻辑与之前相同) ---
+        let pinchDistance = 0.3;
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                
+                const currentPinchDistance = Math.sqrt(
+                    Math.pow(thumbTip.x - indexTip.x, 2) + 
+                    Math.pow(thumbTip.y - indexTip.y, 2)
+                );
+                
+                pinchDistance += (currentPinchDistance - pinchDistance) * 0.15;
+
+                const minGesture = 0.05;
+                const maxGesture = 0.4;
+                const normalizedDistance = Math.min(Math.max(pinchDistance, minGesture), maxGesture);
+                
+                targetScale = 0.3 + (normalizedDistance - minGesture) / (maxGesture - minGesture) * 2.7;
+                
+                if (currentPinchDistance < 0.1) {
+                    handStateSpan.innerText = "手掌合拢 (收缩)";
+                } else if (currentPinchDistance > 0.35) {
+                    handStateSpan.innerText = "手掌张开 (扩散)";
+                } else {
+                    handStateSpan.innerText = "手势追踪中...";
+                }
+
+                statusBar.innerText = `手势响应: 缩放比例 ${targetScale.toFixed(2)} | 手指距离 ${currentPinchDistance.toFixed(3)}`;
+
+            } else {
+                handStateSpan.innerText = "未检测到手掌";
+                statusBar.innerText = "请举起手掌以激活控制...";
+                targetScale += (1.0 - targetScale) * 0.05;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+
+        // --- 5. 动画和渲染循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (particles) {
+                particles.scale.x += (targetScale - particles.scale.x) * 0.15;
+                particles.scale.y += (targetScale - particles.scale.y) * 0.15;
+                particles.scale.z += (targetScale - particles.scale.z) * 0.15;
+                
+                particles.rotation.y += 0.002;
+            }
+
+            renderer.render(scene, camera);
+        }
+        
+        // 系统启动
+        initScene();
+        initParticles(modelSelect.value, colorPicker.value);
+        animate();
+
+    </script>
+</body>
+</html>
